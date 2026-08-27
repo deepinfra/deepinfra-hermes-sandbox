@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "deepinfra-hermes-sandbox"
+version = "0.1.0"
+description = "DeepInfra cloud sandbox (deep_sands) terminal backend plugin for hermes-agent"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [{ name = "DeepInfra" }]
+dependencies = [
+    "deepinfra==0.3.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/deepinfra/deepinfra-hermes-sandbox"
+"DeepInfra Sandboxes docs" = "https://docs.deepinfra.com/sandboxes/overview"
+
+[project.entry-points."hermes_agent.plugins"]
+deepinfra = "deepinfra_hermes_sandbox"
+
+[project.optional-dependencies]
+dev = ["pytest==9.1.1"]
+
+[tool.setuptools.packages.find]
+include = ["deepinfra_hermes_sandbox*"]
