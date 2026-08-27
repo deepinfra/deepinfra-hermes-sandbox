@@ -6,11 +6,17 @@ Registers via hermes-agent's `TerminalEnvironmentProvider` plugin ABI ([hermes-a
 
 ## Install
 
+Not yet published to PyPI — install straight from GitHub for now:
+
 ```bash
-pip install deepinfra-hermes-sandbox
-hermes plugins enable deepinfra
+pip install git+https://github.com/deepinfra/deepinfra-hermes-sandbox
+hermes plugins enable deepinfra-sandbox
 hermes config set terminal.backend deepinfra
 ```
+
+Once published, `pip install deepinfra-hermes-sandbox` will work in place of the `git+https://...` form above.
+
+Note the plugin/enable name is `deepinfra-sandbox`, not `deepinfra` — hermes-agent already bundles two unrelated plugins literally named `deepinfra` (its image-gen and video-gen backends), and `hermes plugins enable deepinfra` would silently enable one of those instead. `terminal.backend` is a separate config value and stays `deepinfra`.
 
 `DEEPINFRA_API_KEY` is required — the same account-level key already used for DeepInfra LLM/image/video inference, if you have that configured. Get one at [deepinfra.com/dash/api_keys](https://deepinfra.com/dash/api_keys).
 

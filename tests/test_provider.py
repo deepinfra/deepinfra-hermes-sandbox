@@ -107,3 +107,24 @@ class TestRegistryIntegration:
         assert "deepinfra" not in reg.BUILTIN_BACKEND_NAMES
         reg.register_provider(DeepInfraProvider())  # must not raise
         assert reg.get_provider("deepinfra") is not None
+
+
+class TestEntryPointName:
+    def test_plugin_entry_point_key_is_not_bare_deepinfra(self):
+        """hermes-agent already bundles two unrelated plugins literally named
+        "deepinfra" (plugins/image_gen/deepinfra, plugins/video_gen/deepinfra).
+        `hermes plugins enable <name>`'s exact-match resolution
+        (hermes_cli/plugins_cmd.py:_resolve_plugin_key) takes the first plugin
+        whose bare manifest name matches, without checking uniqueness -- so if
+        this package's entry-point key were also bare "deepinfra", `hermes
+        plugins enable deepinfra` would silently enable one of those bundled
+        plugins instead of this one. The key must stay distinct (verified live
+        against hermes-agent: "deepinfra-sandbox" resolves correctly)."""
+        import importlib.metadata as md
+
+        eps = [
+            ep for ep in md.entry_points(group="hermes_agent.plugins")
+            if ep.value == "deepinfra_hermes_sandbox"
+        ]
+        assert len(eps) == 1
+        assert eps[0].name != "deepinfra"

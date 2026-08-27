@@ -8,8 +8,8 @@ specifically so third-party cloud sandboxes can ship without touching core
 standalone plugin repo, #93523, for the precedent this follows).
 
 Install:
-    pip install deepinfra-hermes-sandbox
-    hermes plugins enable deepinfra
+    pip install git+https://github.com/deepinfra/deepinfra-hermes-sandbox
+    hermes plugins enable deepinfra-sandbox
     hermes config set terminal.backend deepinfra
 
 DEEPINFRA_API_KEY is the same account-level key already used by DeepInfra's
@@ -65,7 +65,9 @@ class DeepInfraProvider(TerminalEnvironmentProvider):
 
     def setup_instructions(self) -> List[str]:
         return [
-            "pip install deepinfra-hermes-sandbox",
+            "pip install git+https://github.com/deepinfra/deepinfra-hermes-sandbox",
+            "hermes plugins enable deepinfra-sandbox  # not \"deepinfra\" -- "
+            "that name collides with the bundled image/video-gen plugins",
             "Get an API key at https://deepinfra.com/dash/api_keys "
             "(same key used for LLM inference, if already configured)",
             "Set DEEPINFRA_API_KEY in your environment or ~/.hermes/.env",

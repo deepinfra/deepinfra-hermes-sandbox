@@ -19,7 +19,15 @@ Homepage = "https://github.com/deepinfra/deepinfra-hermes-sandbox"
 "DeepInfra Sandboxes docs" = "https://docs.deepinfra.com/sandboxes/overview"
 
 [project.entry-points."hermes_agent.plugins"]
-deepinfra = "deepinfra_hermes_sandbox"
+# The plugin/enable-name is "deepinfra-sandbox", not "deepinfra" -- hermes-agent
+# already bundles two unrelated plugins named bare "deepinfra" (image_gen and
+# video_gen backends), and `hermes plugins enable <name>`'s exact-match
+# resolution (hermes_cli/plugins_cmd.py:_resolve_plugin_key) takes the first
+# entry matching the bare name without checking for uniqueness -- so reusing
+# "deepinfra" here would make `hermes plugins enable deepinfra` silently
+# enable one of those instead of this plugin. DeepInfraProvider.name (the
+# terminal.backend value) is unaffected -- it's a different registry/namespace.
+deepinfra-sandbox = "deepinfra_hermes_sandbox"
 
 [project.optional-dependencies]
 dev = ["pytest==9.1.1"]
