@@ -13,6 +13,7 @@ every other TerminalEnvironmentProvider plugin does.
 
 import io
 import logging
+import os
 import tarfile
 import threading
 import uuid
@@ -48,10 +49,21 @@ _SYNC_DIR = f"{CACHE_PATH_BASE}_sync"
 # against the real catalog: the platform's own default plan ("medium") has
 # only 4GB RAM, so naively fitting the 5GB shared default into the smallest
 # satisfying tier silently picks "large" (2x medium's hourly price) for
-# effectively every user who never customized sizing at all. Always
-# requesting the server's own default plan avoids that footgun; per-plan
-# sizing is a fast-follow once there's a real way to tell "requested" apart
-# from "defaulted".
+# effectively every user who never customized sizing at all.
+#
+# DEEPINFRA_SANDBOX_PLAN is the escape hatch: unlike container_cpu/memory,
+# nothing else in hermes-agent could ever set this env var by accident, so
+# its presence really does mean "the user wants this plan" -- no ambiguity,
+# no auto-fitting logic, no footgun. Absent or empty -> deep_sands' own
+# default plan (currently "medium"). An invalid value is rejected by the
+# server itself (a clear error surfaces from Sandbox.create() the same way
+# any other misconfiguration would); no client-side validation needed.
+# Longer-term this belongs in a provider-owned config key instead of a raw
+# env var (hermes-agent issue #96161 tracks exactly that: provider-scoped
+# `terminal.backends.<provider>` config, which would let plan selection
+# compose properly with the rest of terminal config) -- revisit once that
+# lands.
+_PLAN_ENV_VAR = "DEEPINFRA_SANDBOX_PLAN"
 
 
 class DeepInfraEnvironment(BaseEnvironment):
@@ -153,8 +165,9 @@ class DeepInfraEnvironment(BaseEnvironment):
 
         creation_id = uuid.uuid4().hex
         tags = {"hermes_task_id": task_id, "hermes_creation_id": creation_id}
+        plan = os.getenv(_PLAN_ENV_VAR, "").strip()
         try:
-            return Sandbox.create(plan="", tags=tags, wait=True)
+            return Sandbox.create(plan=plan, tags=tags, wait=True)
         except SandboxWaitError as e:
             self._terminate_leaked_sandbox(Sandbox, getattr(e, "sandbox_id", None))
             raise

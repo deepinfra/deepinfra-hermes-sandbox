@@ -69,6 +69,8 @@ class DeepInfraProvider(TerminalEnvironmentProvider):
             "Get an API key at https://deepinfra.com/dash/api_keys "
             "(same key used for LLM inference, if already configured)",
             "Set DEEPINFRA_API_KEY in your environment or ~/.hermes/.env",
+            "Optional: set DEEPINFRA_SANDBOX_PLAN (e.g. \"large\") to pick a "
+            "plan tier -- defaults to deep_sands' own default plan otherwise",
         ]
 
     def doctor_checks(self) -> List[Tuple[bool, str, str]]:

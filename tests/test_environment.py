@@ -178,7 +178,8 @@ def make_env(deepinfra_sdk, monkeypatch):
 # ---------------------------------------------------------------------------
 
 class TestCreateSandbox:
-    def test_create_passes_task_tag_and_injective_creation_id(self, make_env, deepinfra_sdk):
+    def test_create_passes_task_tag_and_injective_creation_id(self, make_env, deepinfra_sdk, monkeypatch):
+        monkeypatch.delenv("DEEPINFRA_SANDBOX_PLAN", raising=False)
         make_env(task_id="mytask")
         _, kwargs = deepinfra_sdk.Sandbox.create.call_args
         assert kwargs["plan"] == ""
@@ -186,6 +187,18 @@ class TestCreateSandbox:
         assert kwargs["tags"]["hermes_task_id"] == "mytask"
         creation_id = kwargs["tags"]["hermes_creation_id"]
         assert isinstance(creation_id, str) and len(creation_id) == 32  # uuid4().hex
+
+    def test_create_reads_plan_from_env_var_when_set(self, make_env, deepinfra_sdk, monkeypatch):
+        monkeypatch.setenv("DEEPINFRA_SANDBOX_PLAN", "large")
+        make_env(task_id="mytask")
+        _, kwargs = deepinfra_sdk.Sandbox.create.call_args
+        assert kwargs["plan"] == "large"
+
+    def test_create_strips_whitespace_from_plan_env_var(self, make_env, deepinfra_sdk, monkeypatch):
+        monkeypatch.setenv("DEEPINFRA_SANDBOX_PLAN", "  large  ")
+        make_env(task_id="mytask")
+        _, kwargs = deepinfra_sdk.Sandbox.create.call_args
+        assert kwargs["plan"] == "large"
 
     def test_two_creations_get_distinct_creation_ids(self, make_env, deepinfra_sdk):
         """The creation-id tag must be unique per attempt, not per task_id --
