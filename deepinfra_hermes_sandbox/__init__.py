@@ -19,6 +19,7 @@ inference -- no separate credential flow needed here.
 
 from __future__ import annotations
 
+import importlib.metadata
 import importlib.util
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -27,7 +28,13 @@ from agent.terminal_env_provider import TerminalEnvironmentProvider
 
 from deepinfra_hermes_sandbox.environment import CACHE_PATH_BASE, DeepInfraEnvironment
 
-__version__ = "0.1.0"
+try:
+    # Single source of truth is pyproject.toml's `version` -- read back from
+    # the installed distribution's metadata instead of hardcoding a second
+    # copy here that can drift out of sync.
+    __version__ = importlib.metadata.version("deepinfra-hermes-sandbox")
+except importlib.metadata.PackageNotFoundError:
+    __version__ = "0.0.0+unknown"
 
 
 class DeepInfraProvider(TerminalEnvironmentProvider):
@@ -83,7 +90,7 @@ class DeepInfraProvider(TerminalEnvironmentProvider):
                 sdk_installed,
                 "DeepInfra SDK installed",
                 "(deepinfra package)" if sdk_installed
-                else "(missing -- pip install deepinfra-hermes-sandbox)",
+                else "(missing -- pip install git+https://github.com/deepinfra/deepinfra-hermes-sandbox)",
             ),
             (
                 has_key,

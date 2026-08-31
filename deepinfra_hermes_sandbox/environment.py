@@ -2,9 +2,12 @@
 
 Uses the official `deepinfra` Python SDK to run commands in deep_sands cloud
 sandboxes (isolated microVMs, server-side Kubernetes pod-exec -- no SSH, no
-network access to the sandbox at all). Ephemeral only: every session gets a
-fresh sandbox, terminated on cleanup. Persistent/resumable sandboxes (to
-match Daytona's default behavior) are a tracked fast-follow, not v1 scope.
+network access to the sandbox at all). When persistent, an idle-reaped
+sandbox is stopped (not terminated) and resumed by task-tag lookup on the
+next construction, mirroring Daytona's own resume-by-name pattern -- see
+_try_resume_sandbox(). Cross-SESSION resume (a brand new session picking up
+a previous one's sandbox) is still not implemented; this only covers the
+idle-reap-mid-session case.
 
 Runs as a hermes-agent plugin (see __init__.py's DeepInfraProvider) -- these
 imports assume execution inside a running hermes-agent process, the same way
@@ -105,17 +108,18 @@ class DeepInfraEnvironment(BaseEnvironment):
 
         self._Sandbox = Sandbox
         self._task_id = task_id
-        # Gates per-turn teardown (terminal_tool.is_persistent_env()) -- NOT
-        # cross-session resume (v1 has none: _create_sandbox always creates
-        # fresh). Without this, cleanup_task_resources() tears the sandbox
-        # down and rebuilds it from scratch after every single agent turn.
-        # cleanup() below always terminates regardless of this flag -- there
-        # is no resume-by-tag lookup yet, so a stopped-not-deleted sandbox
-        # would just leak with nothing to ever find it again.
+        # Gates per-turn teardown (terminal_tool.is_persistent_env()) AND,
+        # via _try_resume_sandbox()/cleanup() below, whether an idle-reaped
+        # sandbox is stopped-and-resumable or fully terminated. Without this,
+        # cleanup_task_resources() tears the sandbox down and rebuilds it
+        # from scratch after every single agent turn.
         self._persistent = persistent_filesystem
         self._lock = threading.Lock()
-        self._sandbox = self._create_sandbox(Sandbox, task_id)
-        logger.info("DeepInfra: created sandbox %s for task %s", self._sandbox.id, task_id)
+
+        self._sandbox = self._try_resume_sandbox(Sandbox, task_id) if self._persistent else None
+        if self._sandbox is None:
+            self._sandbox = self._create_sandbox(Sandbox, task_id)
+            logger.info("DeepInfra: created sandbox %s for task %s", self._sandbox.id, task_id)
 
         self._sync_manager = FileSyncManager(
             get_files_fn=lambda: iter_sync_files(CACHE_PATH_BASE),
@@ -160,6 +164,10 @@ class DeepInfraEnvironment(BaseEnvironment):
         creation-id tag; the fallback only ever reconciles by that exact
         value, so a match is provably this call's own sandbox and nothing
         else's.
+
+        This is a fresh, unconditional create -- called either directly (no
+        persistence requested) or as the fallback when
+        _try_resume_sandbox() found nothing safe to resume.
         """
         from deepinfra import APIConnectionError, APIStatusError, SandboxWaitError
 
@@ -187,6 +195,61 @@ class DeepInfraEnvironment(BaseEnvironment):
             Sandbox.from_id(sandbox_id).terminate()
         except Exception:
             logger.warning("DeepInfra: failed to clean up failed-boot sandbox %s", sandbox_id)
+
+    @staticmethod
+    def _try_resume_sandbox(Sandbox, task_id: str):
+        """Resume a previously stopped, still-persistent sandbox for this
+        task, or return None to fall back to a fresh create().
+
+        Mirrors Daytona's own resume-by-name pattern (tools/environments/
+        daytona.py: ``self._daytona.get(f"hermes-{task_id}")``) using what
+        deep_sands actually exposes -- tag list + from_id, not a name
+        lookup. This closes the idle-reap data-loss gap: hermes-agent's
+        idle reaper (terminal.lifetime_seconds, default 300s) tears down
+        and recreates the environment object after 5 minutes of inactivity;
+        without a resume path, cleanup() had to fully terminate (or leak a
+        stopped sandbox nothing would ever find again).
+
+        Only ever resumes on an UNAMBIGUOUS single match in "stopped"
+        state:
+        - hermes_task_id is not an ownership token -- it collapses to a
+          shared "default" value across independent processes absent a
+          session context (see _create_sandbox's docstring). Two or more
+          matches means we cannot tell which one is really "this" task's,
+          so we refuse to guess and create fresh instead. This carries the
+          same task_id-collision profile Daytona's own resume-by-name
+          already accepts in this codebase -- not a new risk class.
+        - A match that ISN'T "stopped" (e.g. still "running") is left
+          alone rather than attached to -- that state means something else
+          may actively be using it right now.
+        """
+        try:
+            candidates = [
+                sb for sb in Sandbox.list(tags={"hermes_task_id": task_id})
+                if sb.state == "stopped"
+            ]
+        except Exception as e:
+            logger.warning("DeepInfra: resume lookup failed for task %s: %s", task_id, e)
+            return None
+
+        if not candidates:
+            return None
+        if len(candidates) > 1:
+            logger.warning(
+                "DeepInfra: %d stopped sandboxes match task %s -- ambiguous, "
+                "creating a new one instead of guessing which to resume",
+                len(candidates), task_id,
+            )
+            return None
+
+        sandbox = candidates[0]
+        try:
+            sandbox.start()
+        except Exception as e:
+            logger.warning("DeepInfra: failed to resume sandbox %s: %s", sandbox.id, e)
+            return None
+        logger.info("DeepInfra: resumed sandbox %s for task %s", sandbox.id, task_id)
+        return sandbox
 
     def execute(self, command: str, cwd: str = "", **kwargs) -> dict:
         """Override to keep the /workspace cwd default in effect on every call.
@@ -281,18 +344,32 @@ class DeepInfraEnvironment(BaseEnvironment):
                     logger.warning("DeepInfra: sync_back failed: %s", e)
 
             try:
-                self._sandbox.terminate()
-                logger.info("DeepInfra: terminated sandbox %s", self._sandbox.id)
+                if self._persistent:
+                    # Stop, don't terminate: this is also what runs on every
+                    # idle-reap (terminal.lifetime_seconds, default 300s),
+                    # not just real session end. Terminating here would
+                    # destroy /workspace after 5 idle minutes; stopping
+                    # preserves it for _try_resume_sandbox() on the next
+                    # construction, mirroring Daytona's own persistent
+                    # cleanup() (tools/environments/daytona.py).
+                    self._sandbox.stop()
+                    logger.info(
+                        "DeepInfra: stopped sandbox %s (filesystem preserved)",
+                        self._sandbox.id,
+                    )
+                else:
+                    self._sandbox.terminate()
+                    logger.info("DeepInfra: terminated sandbox %s", self._sandbox.id)
             except Exception as e:
-                # Do NOT drop the handle here: terminate() failing is
-                # indeterminate, not confirmation the sandbox is gone. If we
-                # null self._sandbox unconditionally, a transient failure
-                # permanently loses the only reference needed to retry --
-                # the sandbox may still exist and still be billing. Leaving
-                # self._sandbox set means a subsequent cleanup() call (the
-                # idle reaper retries, or the caller retries explicitly)
-                # naturally retries the exact same terminate() against the
-                # exact same sandbox, not a tag-based re-lookup.
+                # Do NOT drop the handle here: stop()/terminate() failing is
+                # indeterminate, not confirmation the sandbox is gone/stopped.
+                # If we null self._sandbox unconditionally, a transient
+                # failure permanently loses the only reference needed to
+                # retry -- the sandbox may still exist and still be billing.
+                # Leaving self._sandbox set means a subsequent cleanup() call
+                # (the idle reaper retries, or the caller retries explicitly)
+                # naturally retries against the exact same sandbox, not a
+                # tag-based re-lookup.
                 logger.warning("DeepInfra: cleanup failed, will retry on next call: %s", e)
                 return
             self._sandbox = None

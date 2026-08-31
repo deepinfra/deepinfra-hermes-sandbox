@@ -302,8 +302,15 @@ class TestCreateSandbox:
 
         from deepinfra_hermes_sandbox.environment import DeepInfraEnvironment
 
+        # persistent_filesystem=False: isolates this test to _create_sandbox's
+        # own fallback-reconciliation behavior. Resume-checking (persistent
+        # path) also calls Sandbox.list(tags={"hermes_task_id": ...}) by
+        # design -- see TestResumeSandbox for its own, separate safety proof.
         with pytest.raises(deepinfra_sdk.APIConnectionError):
-            DeepInfraEnvironment(cwd="/workspace", timeout=60, task_id="default")
+            DeepInfraEnvironment(
+                cwd="/workspace", timeout=60, task_id="default",
+                persistent_filesystem=False,
+            )
 
         # The only Sandbox.list() call must have been keyed by the unique
         # creation id -- never by the shared task tag -- so the foreign
@@ -313,6 +320,97 @@ class TestCreateSandbox:
             assert set(call.kwargs["tags"].keys()) == {"hermes_creation_id"}
         deepinfra_sdk.Sandbox.from_id.assert_not_called()
         foreign_healthy_sandbox.terminate.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Idle-reap resume (stop-and-resume, not terminate-and-recreate)
+# ---------------------------------------------------------------------------
+
+class TestResumeSandbox:
+    def test_resumes_single_stopped_match_without_creating(self, make_env, deepinfra_sdk):
+        stopped = _make_sandbox(sandbox_id="sb-resume-me", state="stopped")
+        deepinfra_sdk.Sandbox.list = MagicMock(return_value=[stopped])
+
+        env = make_env(persistent_filesystem=True, task_id="mytask")
+
+        deepinfra_sdk.Sandbox.create.assert_not_called()
+        stopped.start.assert_called_once()
+        assert env._sandbox is stopped
+
+    def test_falls_back_to_create_when_no_match(self, make_env, deepinfra_sdk):
+        deepinfra_sdk.Sandbox.list = MagicMock(return_value=[])
+        env = make_env(persistent_filesystem=True, task_id="mytask")
+        deepinfra_sdk.Sandbox.create.assert_called_once()
+        assert env._sandbox is env._mock_sandbox
+
+    def test_ignores_non_stopped_matches(self, make_env, deepinfra_sdk):
+        """A match that isn't "stopped" (e.g. still "running") might be in
+        active use by something else right now -- never attach to it."""
+        running = _make_sandbox(sandbox_id="sb-running", state="running")
+        deepinfra_sdk.Sandbox.list = MagicMock(return_value=[running])
+
+        env = make_env(persistent_filesystem=True, task_id="mytask")
+
+        running.start.assert_not_called()
+        deepinfra_sdk.Sandbox.create.assert_called_once()
+        assert env._sandbox is env._mock_sandbox
+
+    def test_refuses_to_guess_on_multiple_stopped_matches(self, make_env, deepinfra_sdk):
+        """task_id is not an ownership token -- it collapses to a shared
+        "default" value across independent processes (see
+        TestCreateSandbox's ownership-bug regression). An ambiguous match
+        must never be guessed at; create fresh instead."""
+        a = _make_sandbox(sandbox_id="sb-a", state="stopped")
+        b = _make_sandbox(sandbox_id="sb-b", state="stopped")
+        deepinfra_sdk.Sandbox.list = MagicMock(return_value=[a, b])
+
+        env = make_env(persistent_filesystem=True, task_id="default")
+
+        a.start.assert_not_called()
+        b.start.assert_not_called()
+        deepinfra_sdk.Sandbox.create.assert_called_once()
+        assert env._sandbox is env._mock_sandbox
+
+    def test_never_attaches_to_foreign_sandbox_sharing_the_collapsed_task_tag(
+        self, make_env, deepinfra_sdk,
+    ):
+        """Companion to the ownership-bug regression in TestCreateSandbox,
+        for the resume path specifically: a foreign, healthy-but-not-stopped
+        sandbox sharing the same collapsed task tag must never be started
+        into or otherwise touched."""
+        foreign = MagicMock()
+        foreign.id = "sb-foreign"
+        foreign.state = "running"
+        deepinfra_sdk.Sandbox.list = MagicMock(return_value=[foreign])
+
+        env = make_env(persistent_filesystem=True, task_id="default")
+
+        foreign.start.assert_not_called()
+        foreign.terminate.assert_not_called()
+        assert env._sandbox is not foreign
+
+    def test_list_failure_falls_back_to_create(self, make_env, deepinfra_sdk):
+        deepinfra_sdk.Sandbox.list = MagicMock(side_effect=RuntimeError("network blip"))
+        env = make_env(persistent_filesystem=True, task_id="mytask")
+        deepinfra_sdk.Sandbox.create.assert_called_once()
+        assert env._sandbox is env._mock_sandbox
+
+    def test_start_failure_falls_back_to_create(self, make_env, deepinfra_sdk):
+        stopped = _make_sandbox(sandbox_id="sb-wont-start", state="stopped")
+        stopped.start.side_effect = RuntimeError("resume failed")
+        deepinfra_sdk.Sandbox.list = MagicMock(return_value=[stopped])
+
+        env = make_env(persistent_filesystem=True, task_id="mytask")
+
+        deepinfra_sdk.Sandbox.create.assert_called_once()
+        assert env._sandbox is env._mock_sandbox
+
+    def test_never_checked_when_not_persistent(self, make_env, deepinfra_sdk):
+        """Ephemeral requests (container_persistent: false) must always get
+        a fresh sandbox -- never silently resume a previous one."""
+        deepinfra_sdk.Sandbox.list = MagicMock()
+        make_env(persistent_filesystem=False, task_id="mytask")
+        deepinfra_sdk.Sandbox.list.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -666,13 +764,28 @@ class TestDelete:
 # ---------------------------------------------------------------------------
 
 class TestCleanup:
-    def test_cleanup_terminates_and_drops_handle_on_success(self, make_env):
-        env = make_env()
+    def test_cleanup_terminates_and_drops_handle_on_success_when_not_persistent(self, make_env):
+        env = make_env(persistent_filesystem=False)
         env.cleanup()
         env._mock_sandbox.terminate.assert_called_once()
+        env._mock_sandbox.stop.assert_not_called()
         assert env._sandbox is None
 
-    def test_cleanup_preserves_handle_on_terminate_failure_then_retries_successfully(self, make_env):
+    def test_cleanup_stops_and_drops_handle_on_success_when_persistent(self, make_env):
+        """The idle reaper (terminal.lifetime_seconds, default 300s) calls
+        cleanup() after 5 minutes of inactivity -- not just at real session
+        end. A persistent sandbox must be stopped (filesystem preserved,
+        resumable via _try_resume_sandbox), never terminated, or an idle
+        user silently loses /workspace."""
+        env = make_env(persistent_filesystem=True)
+        env.cleanup()
+        env._mock_sandbox.stop.assert_called_once()
+        env._mock_sandbox.terminate.assert_not_called()
+        assert env._sandbox is None
+
+    def test_cleanup_preserves_handle_on_terminate_failure_then_retries_successfully_when_not_persistent(
+        self, make_env,
+    ):
         """Regression for the second ownership bug: cleanup() used to drop
         self._sandbox unconditionally even when terminate() failed. That
         loses the ONLY reference needed to retry -- an indeterminate
@@ -680,7 +793,7 @@ class TestCleanup:
         gone. This proves the handle survives a failed attempt and a
         second cleanup() call can still reconcile/terminate the exact same
         sandbox."""
-        env = make_env()
+        env = make_env(persistent_filesystem=False)
         env._mock_sandbox.terminate.side_effect = [RuntimeError("transient failure"), None]
 
         env.cleanup()  # first attempt: terminate() fails
@@ -692,8 +805,25 @@ class TestCleanup:
         assert env._mock_sandbox.terminate.call_count == 2
         assert env._sandbox is None
 
+    def test_cleanup_preserves_handle_on_stop_failure_then_retries_successfully_when_persistent(
+        self, make_env,
+    ):
+        """Same handle-preservation guarantee as the non-persistent/terminate
+        case, for the persistent/stop path added for idle-reap safety."""
+        env = make_env(persistent_filesystem=True)
+        env._mock_sandbox.stop.side_effect = [RuntimeError("transient failure"), None]
+
+        env.cleanup()  # first attempt: stop() fails
+        assert env._sandbox is not None, (
+            "handle must survive an indeterminate stop() failure"
+        )
+
+        env.cleanup()  # second attempt: same exact sandbox, stop() succeeds
+        assert env._mock_sandbox.stop.call_count == 2
+        assert env._sandbox is None
+
     def test_cleanup_is_idempotent_after_confirmed_success(self, make_env):
-        env = make_env()
+        env = make_env(persistent_filesystem=False)
         env.cleanup()
         env._mock_sandbox.terminate.reset_mock()
         env.cleanup()  # second call: sandbox already None, must no-op
