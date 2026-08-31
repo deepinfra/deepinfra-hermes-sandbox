@@ -17,6 +17,7 @@ every other TerminalEnvironmentProvider plugin does.
 import io
 import logging
 import os
+import shlex
 import tarfile
 import threading
 import uuid
@@ -269,7 +270,64 @@ class DeepInfraEnvironment(BaseEnvironment):
         """
         if cwd in ("", "/root"):
             cwd = self.cwd
+
+        stdin_data = kwargs.pop("stdin_data", None)
+        if stdin_data:
+            command = self._pipe_stdin_via_remote_temp(command, stdin_data)
         return super().execute(command, cwd, **kwargs)
+
+    def _pipe_stdin_via_remote_temp(self, command: str, stdin_data: str) -> str:
+        """Deliver ``stdin_data`` to *command* without BaseEnvironment's
+        heredoc embedding (``_stdin_mode = "heredoc"``), which has two bugs
+        found live against a multi-statement script (hermes-agent's own
+        atomic ``write_file``, ``tools/file_operations.py``'s
+        ``_atomic_write``):
+
+        1. ``_embed_stdin_heredoc`` appends ``<< 'DELIM'`` to the END of the
+           whole command string. A heredoc redirect binds to the LAST simple
+           command in a ``;``-separated script, not to whichever earlier
+           statement actually reads stdin (``cat > "$tmp"`` in
+           ``_atomic_write``) -- so the real target of the write never gets
+           its input, and instead blocks reading the sandbox exec call's own
+           (never-EOF'd) stdin until the full command timeout elapses. Live
+           reproduction: a 29-byte write hung for the entire configured
+           timeout (180s in a real agent run; reproduced deterministically
+           down to 15s) before failing with "Command timed out".
+        2. Even for a single simple command where #1 doesn't apply, a
+           heredoc body MUST end with a newline before its closing
+           delimiter -- so any content that doesn't already end in ``\\n``
+           silently gains one on disk. Confirmed live: on-disk sha256
+           matched content+"\\n", not the original bytes, tripping
+           hermes-agent's own post-write hash verification.
+
+        Fix: upload stdin_data to a small remote temp file via fs.write()
+        (byte-exact, no shell quoting or heredoc-fidelity concerns at all),
+        then pipe that file's content into a ``{ command; }`` GROUP. A pipe
+        correctly delivers its stream to whichever single statement inside
+        the group reads stdin, regardless of how many other statements
+        precede or follow it in the group -- unlike a heredoc, which binds
+        to one specific (and here, wrong) statement. Piping from an
+        uploaded file also means the command string itself only ever
+        carries a short temp path, not the content -- deep_sands' exec()
+        has no stdin field at all (nothing rides outside the command
+        string either way), so this avoids adding any argv-size exposure
+        beyond what the temp path costs.
+
+        Known gap: BaseEnvironment.execute()'s sudo_stdin merging (from
+        _prepare_command) runs AFTER this override returns and never sees
+        stdin_data here, so it can't be combined with a sudo password
+        prompt's stdin. Not a realistic scenario for deep_sands sandboxes
+        (single-user root-equivalent microVMs, no interactive sudo prompts
+        in practice) -- not handled.
+        """
+        remote_tmp = f"{_SYNC_DIR}/{uuid.uuid4().hex}.stdin"
+        self._sandbox.fs.write(remote_tmp, stdin_data.encode("utf-8", errors="surrogateescape"))
+        q_tmp = shlex.quote(remote_tmp)
+        return (
+            f"cat {q_tmp} | {{ {command}\n}}; "
+            f"__hermes_stdin_ec=$?; rm -f {q_tmp}; "
+            f"( exit $__hermes_stdin_ec )"
+        )
 
     def _before_execute(self) -> None:
         """Restart sandbox if it was stopped (idle-timeout auto-stop), then sync files."""

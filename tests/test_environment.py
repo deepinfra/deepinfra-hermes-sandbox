@@ -547,6 +547,46 @@ class TestExecute:
         args, _ = env._mock_sandbox.exec.call_args
         assert args == ("bash", "-l", "-c", "whoami")
 
+    def test_stdin_data_uploads_to_temp_and_pipes_into_command(self, make_env):
+        """Regression for two live-reproduced bugs in BaseEnvironment's
+        default heredoc-based stdin embedding (_stdin_mode = "heredoc"):
+        (1) a heredoc appended to a multi-statement script binds to the
+        LAST statement, not whichever one actually reads stdin -- the real
+        target then blocks reading the sandbox exec call's own stdin until
+        the full timeout elapses; (2) a heredoc body always gains exactly
+        one trailing newline, silently corrupting content that doesn't
+        already end in one. Both confirmed live against hermes-agent's own
+        atomic write_file script. Fixed by uploading stdin_data to a remote
+        temp file (byte-exact) and piping it into a ``{ command; }`` group
+        instead -- a pipe delivers correctly to whichever single statement
+        inside the group reads stdin, and fs.write() has no newline/quoting
+        fidelity issues at all."""
+        env = make_env()
+        env._mock_sandbox.exec.reset_mock()
+        env._mock_sandbox.exec.return_value = _make_exec_result()
+        env._mock_sandbox.fs.write.reset_mock()
+
+        env.execute("set -e; cat > \"$tmp\"; mv \"$tmp\" real; trap - EXIT", stdin_data="payload-content")
+
+        # Uploaded byte-exact, no encoding/escaping applied to the content itself.
+        (remote_path, data), _ = env._mock_sandbox.fs.write.call_args
+        assert remote_path.startswith("/workspace/.hermes_sync/")
+        assert remote_path.endswith(".stdin")
+        assert data == b"payload-content"
+
+        args, _ = env._mock_sandbox.exec.call_args
+        sent_command = args[-1]
+        assert f"cat {remote_path}" in sent_command or f"cat '{remote_path}'" in sent_command
+        assert "<<" not in sent_command  # no heredoc involved at all
+        assert "{ set -e; cat > \"$tmp\"; mv \"$tmp\" real; trap - EXIT\n}" in sent_command
+        assert f"rm -f {remote_path}" in sent_command or f"rm -f '{remote_path}'" in sent_command
+
+    def test_no_stdin_data_skips_temp_upload(self, make_env):
+        env = make_env()
+        env._mock_sandbox.fs.write.reset_mock()
+        env.execute("echo hello")
+        env._mock_sandbox.fs.write.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # Exec error mapping
