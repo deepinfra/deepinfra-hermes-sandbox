@@ -23,10 +23,11 @@ import threading
 import uuid
 from pathlib import Path
 
-from tools.environments.base import (
-    BaseEnvironment,
-    _ThreadedProcessHandle,
-)
+from tools.environments.base import BaseEnvironment
+# _ThreadedProcessHandle moved here in hermes-agent's base.py/base_output.py
+# split (2026-09-02, 3bbec90f23) -- base.py no longer re-exports it. Import
+# straight from base_output, matching how Daytona/Modal do it post-refactor.
+from tools.environments.base_output import _ThreadedProcessHandle
 from tools.environments.file_sync import (
     FileSyncManager,
     iter_sync_files,
