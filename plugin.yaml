@@ -1,0 +1,12 @@
+name: deepinfra-sandbox
+version: "0.1.0"
+description: Run commands in a DeepInfra cloud sandbox (deep_sands) -- isolated microVMs reached only via server-side exec, no network access to the sandbox.
+author: DeepInfra
+kind: backend
+requires_env:
+  - DEEPINFRA_API_KEY
+provides_tools: []
+provides_hooks: []
+capabilities: []
+homepage: https://github.com/deepinfra/deepinfra-hermes-sandbox
+license: MIT
