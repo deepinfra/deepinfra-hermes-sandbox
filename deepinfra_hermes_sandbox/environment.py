@@ -174,7 +174,12 @@ class DeepInfraEnvironment(BaseEnvironment):
         from deepinfra import APIConnectionError, APIStatusError, SandboxWaitError
 
         creation_id = uuid.uuid4().hex
-        tags = {"hermes_task_id": task_id, "hermes_creation_id": creation_id}
+        # Internal DeepInfra bookkeeping tag; not read by this plugin itself.
+        tags = {
+            "hermes_task_id": task_id,
+            "hermes_creation_id": creation_id,
+            "di/hermes-sandbox": "true",
+        }
         plan = os.getenv(_PLAN_ENV_VAR, "").strip()
         try:
             return Sandbox.create(plan=plan, tags=tags, wait=True)
