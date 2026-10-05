@@ -178,7 +178,7 @@ class DeepInfraEnvironment(BaseEnvironment):
         tags = {
             "hermes_task_id": task_id,
             "hermes_creation_id": creation_id,
-            "di/hermes-sandbox": "true",
+            "di:hermes-sandbox": "true",
         }
         plan = os.getenv(_PLAN_ENV_VAR, "").strip()
         try:
